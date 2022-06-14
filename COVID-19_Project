@@ -1,0 +1,178 @@
+/*
+Covid 19 Data Exploration 
+Skills used: Joins, CTEs, Temp Tables, Windows Functions, Aggregate Functions, Views, Subqueries, Union
+*/
+
+--Quick look at the two tables I have imported
+SELECT *
+FROM coviddeaths
+WHERE continent IS NOT null 
+ORDER BY 3,4
+
+SELECT *
+FROM covidvaccinations
+WHERE continent IS NOT null 
+ORDER BY 3,4
+
+
+-- Select Data that we are going to be starting with
+SELECT location, date, total_cases, new_cases, total_deaths, population
+FROM coviddeaths
+WHERE continent IS NOT null 
+ORDER BY location, date
+
+
+-- Total Cases vs Total Deaths
+-- Shows likelihood of dying if you contract covid in the US
+SELECT location, date, total_cases,total_deaths, (total_deaths/total_cases)*100 as death_percentage
+FROM coviddeaths
+WHERE location ILIKE '%states%' AND continent IS NOT null 
+ORDER BY 1,2 DESC
+
+
+
+-- Total Cases vs Population
+-- Shows growth in percentage of population infected with Covid in the US
+SELECT location, date, Population, total_cases,  (total_cases/population)*100 AS percent_infected
+FROM coviddeaths
+WHERE location ILIKE '%states%'
+ORDER BY 1,2
+
+
+-- Countries with Highest Infection Rate compared to Population
+SELECT location, Population, MAX(total_cases) AS higest_infection_count,  Max((total_cases/population))*100 AS percent_infected
+FROM coviddeaths
+GROUP BY location, Population
+HAVING Max((total_cases/population))*100 IS NOT null
+ORDER BY percent_infected DESC
+
+
+-- Countries with Highest Death Count per location
+SELECT location, MAX(total_deaths) AS total_death_count
+FROM coviddeaths
+WHERE continent IS NOT null
+GROUP BY location
+HAVING MAX(total_deaths) IS NOT null
+ORDER BY total_death_count DESC
+
+-- Breaking things down by continent: 
+-- Showing contintents with the highest death count
+Select continent, MAX(total_deaths) AS total_death_count
+FROM coviddeaths
+WHERE continent IS NOT null 
+GROUP BY continent
+ORDER BY total_death_count DESC
+
+
+--Total cases, total deaths, and death percentage globally (as of 4/12/22)
+SELECT SUM(new_cases) AS total_cases, SUM(new_deaths) AS total_deaths, 
+	SUM(new_deaths)/SUM(new_Cases)*100 AS death_percentage
+FROM CovidDeaths
+WHERE continent IS NOT null 
+
+
+-- Total Population vs Vaccinations: Shows percentage of population that has recieved at least one covid vaccine over time
+WITH rollingvaccinations AS(
+SELECT dea.continent, dea.location, dea.date, dea.population, vac.new_vaccinations, 
+	SUM(vac.new_vaccinations) OVER (PARTITION BY dea.location ORDER BY dea.location, dea.date) AS rolling_people_vaccinated
+	--Does rolling sum and every time we get to a new location, the sum will start over
+FROM coviddeaths dea
+JOIN covidvaccinations vac ON dea.location = vac.location AND dea.date = vac.date
+WHERE dea.continent IS NOT null AND vac.new_vaccinations IS NOT null
+ORDER BY 2,3)
+SELECT *, (rolling_people_vaccinated/population)*100 AS percent_vaccinated
+FROM rollingvaccinations 
+
+
+
+-- Using a temp table to perform previous calculation
+DROP TABLE percent_vaccinated;
+CREATE TABLE percent_vaccinated
+(
+continent varchar(255),
+location varchar(255),
+date date,
+population numeric,
+new_vaccinations numeric,
+rolling_people_vaccinated numeric
+)
+INSERT INTO percent_vaccinated
+SELECT dea.continent, dea.location, dea.date, dea.population, vac.new_vaccinations, 
+	SUM(vac.new_vaccinations) OVER (PARTITION BY dea.location ORDER BY dea.location, dea.date) AS rolling_people_vaccinated
+FROM coviddeaths dea
+JOIN covidvaccinations vac ON dea.location = vac.location AND dea.date = vac.date
+WHERE dea.continent IS NOT null AND vac.new_vaccinations IS NOT null
+ORDER BY 2,3
+
+SELECT *, (rolling_people_vaccinated/population)*100 AS percent_vaccinated
+From percent_vaccinated
+
+
+
+-- Views: can use to store data for potential visualizations and also useful when you don't want to display certain columns for privacy reasons
+-- Ranks based on which location has the highest percentage of people who have been fully vaccinated
+DROP VIEW vaccination_ranking
+CREATE VIEW vaccination_ranking AS
+SELECT *, ROUND(num_fully_vaccinated/population * 100,2) AS percent_vaccinated,
+	RANK()OVER(ORDER BY num_fully_vaccinated/population DESC) AS highest_vaccination_rate
+FROM (
+SELECT dea.location, dea.population, MAX(vac.people_fully_vaccinated) AS num_fully_vaccinated
+FROM coviddeaths dea
+JOIN covidvaccinations vac 
+	ON dea.location = vac.location AND dea.date = vac.date
+WHERE dea.continent IS NOT null AND vac.new_vaccinations IS NOT null
+GROUP BY dea.location, dea.population
+ORDER BY 1) vac
+WHERE num_fully_vaccinated/population  IS NOT null
+
+SELECT *
+FROM vaccination_ranking
+
+
+--Ranks based on which location has the lowest percentage of people who have contracted covid
+DROP VIEW covid_ranking
+CREATE VIEW covid_ranking AS
+SELECT dea.location, dea.population, MAX(total_cases) AS total_cases, 
+	ROUND((MAX(total_cases)/population)*100,4) AS percent_infected,
+	RANK()OVER(ORDER BY MAX(total_cases)/population) AS lowest_covid_rate
+FROM coviddeaths dea
+JOIN covidvaccinations vac 
+	ON dea.location = vac.location AND dea.date = vac.date
+WHERE dea.continent IS NOT null AND vac.new_vaccinations IS NOT null
+GROUP BY dea.location, dea.population
+
+SELECT *
+FROM covid_ranking
+
+
+-- Counts how many locations with the top 50 vaccination rates also have the bottom 50 infection rates
+-- Only 5/50 or 10% match
+SELECT ROUND(CAST(CAST(COUNT(*) AS float)/50 AS numeric)*100)
+FROM vaccination_ranking
+WHERE highest_vaccination_rate <50 
+	AND location IN (SELECT location FROM covid_ranking WHERE lowest_covid_rate < 50)
+
+
+-- Compares the rate of people aged 70(+) in locations with the top 50% mortality rates to the bottom 50% mortality rates (as of 4/12/22)
+-- This query shows there is a 79% higher rate of people aged 70(+) in locations with a higher mortality rate(208 locations)
+SELECT 'Upper Half' AS mortality_rate, AVG(aged_70_older) AS avg_over_70
+FROM (
+SELECT dea.location, (dea.total_deaths/dea.total_cases) AS mortality_rate, aged_70_older,
+	RANK()OVER(ORDER BY (dea.total_deaths/dea.total_cases) DESC) AS ranking
+FROM coviddeaths dea
+JOIN covidvaccinations vac 
+	ON dea.location = vac.location AND dea.date = vac.date
+WHERE dea.continent IS NOT null AND dea.date = '4/12/22' AND (dea.total_deaths/dea.total_cases) IS NOT null) up
+WHERE ranking >= 104
+UNION 
+SELECT 'Lower Half' AS mortality_rate, AVG(aged_70_older) AS avg_over_70
+FROM (
+SELECT dea.location, (dea.total_deaths/dea.total_cases) AS mortality_rate, aged_70_older,
+	RANK()OVER(ORDER BY (dea.total_deaths/dea.total_cases) DESC) AS ranking
+FROM coviddeaths dea
+JOIN covidvaccinations vac 
+	ON dea.location = vac.location AND dea.date = vac.date
+WHERE dea.continent IS NOT null AND dea.date = '4/12/22' AND (dea.total_deaths/dea.total_cases) IS NOT null) low
+WHERE ranking <= 105
+
+
